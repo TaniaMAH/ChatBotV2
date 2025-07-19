@@ -1,14 +1,14 @@
 import re
 import json
-import requests
 from typing import List, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
+from llm_utils import generate_response  # ✅ nuevo import
+
 class IntelligentCurriculumChunker:
-    def __init__(self, use_llm: bool = True, ollama_url: str = "http://localhost:11434", max_workers: int = 4):
+    def __init__(self, use_llm: bool = True, max_workers: int = 4):
         self.use_llm = use_llm
-        self.ollama_url = ollama_url
         self.max_workers = max_workers
         self.fallback_to_structural = True
         self.structural_patterns = {
@@ -27,33 +27,6 @@ class IntelligentCurriculumChunker:
         }
         print("🧠 Chunker Inteligente inicializado")
         print(f"   🤖 Modo LLM: {'✅' if use_llm else '❌'}")
-        if use_llm:
-            self._test_llm_connection()
-
-    def _test_llm_connection(self) -> bool:
-        try:
-            response = requests.get(f"{self.ollama_url}/api/tags", timeout=10)
-            if response.status_code == 200:
-                models = response.json().get('models', [])
-                model_names = [m['name'] for m in models]
-                preferred_models = ['llama3.2', 'llama3.1', 'llama3', 'mistral']
-                self.selected_model = None
-                for model in preferred_models:
-                    matching = [m for m in model_names if model in m.lower()]
-                    if matching:
-                        self.selected_model = matching[0]
-                        print(f"   🎯 Modelo seleccionado: {self.selected_model}")
-                        break
-                if not self.selected_model and models:
-                    self.selected_model = models[0]['name']
-                    print(f"   ⚠️  Usando modelo por defecto: {self.selected_model}")
-                return True
-            else:
-                print(f"   ❌ Error conectando Ollama: {response.status_code}")
-                return False
-        except Exception as e:
-            print(f"   ❌ Ollama no disponible: {e}")
-            return False
 
     def chunk_program_intelligently(self, program_text: str, program_name: str) -> List[Dict[str, Any]]:
         print(f"🧠 Analizando programa: {program_name}")
@@ -62,7 +35,7 @@ class IntelligentCurriculumChunker:
         self.stats['structural_chunks'] += len(structural_chunks)
 
         llm_chunks = []
-        if self.use_llm and hasattr(self, 'selected_model'):
+        if self.use_llm:
             llm_chunks = self._llm_semantic_chunking(program_text, program_name)
             if llm_chunks:
                 self.stats['llm_chunks'] += len(llm_chunks)
@@ -81,11 +54,9 @@ class IntelligentCurriculumChunker:
             return structural_chunks
 
     def _llm_semantic_chunking(self, program_text: str, program_name: str) -> List[Dict[str, Any]]:
-        timeouts = [120, 300]
-        for attempt, timeout in enumerate(timeouts, 1):
-            print(f"   🔄 Intento {attempt}/{len(timeouts)} (timeout: {timeout}s)")
-            if attempt == 1:
-                prompt = f"""
+        print(f"   🤖 Generando chunks con modelo HuggingFace (Mistral)...")
+
+        prompt = f"""
 Eres un experto en análisis de documentos académicos. Analiza este programa universitario y divide el contenido en chunks semánticamente coherentes.
 
 PROGRAMA: {program_name}
@@ -117,78 +88,33 @@ FORMATO DE RESPUESTA (JSON):
 
 Responde SOLO con el JSON válido:
 """
-            else:
-                prompt = f"""Analiza este programa y extrae información clave:
 
-PROGRAMA: {program_name}
-CONTENIDO: {program_text[:1500]}
-
-Crea chunks JSON:
-{{"chunks": [{{"content": "texto", "type": "fee|occupational_profile|curriculum_summary", "metadata": {{"program_name": "{program_name}"}}}}]}}"""
-
-            try:
-                response = requests.post(
-                    f"{self.ollama_url}/api/generate",
-                    json={
-                        "model": self.selected_model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {
-                            "temperature": 0.1,
-                            "top_p": 0.9,
-                            "num_predict": 300 if attempt == 2 else 1000
+        try:
+            llm_output = generate_response(prompt, max_tokens=1024)
+            json_match = re.search(r'\{.*\}', llm_output, re.DOTALL)
+            if json_match:
+                chunks_data = json.loads(json_match.group())
+                processed_chunks = []
+                for chunk in chunks_data.get('chunks', []):
+                    processed_chunk = {
+                        'content': chunk['content'],
+                        'metadata': {
+                            **chunk.get('metadata', {}),
+                            'type': chunk['type'],
+                            'llm_generated': True,
+                            'confidence': 0.9,
+                            'attempt': 1
                         }
-                    },
-                    timeout=timeout
-                )
-
-                if response.status_code == 200:
-                    llm_output = response.json()['response']
-                    json_match = re.search(r'\{.*\}', llm_output, re.DOTALL)
-                    if json_match:
-                        try:
-                            chunks_data = json.loads(json_match.group())
-                            processed_chunks = []
-                            for chunk in chunks_data.get('chunks', []):
-                                processed_chunk = {
-                                    'content': chunk['content'],
-                                    'metadata': {
-                                        **chunk.get('metadata', {}),
-                                        'type': chunk['type'],
-                                        'llm_generated': True,
-                                        'confidence': 0.9,
-                                        'attempt': attempt
-                                    }
-                                }
-                                processed_chunks.append(processed_chunk)
-                            print(f"   ✅ LLM exitoso en intento {attempt}")
-                            return processed_chunks
-                        except json.JSONDecodeError:
-                            print(f"   ⚠️  JSON inválido en intento {attempt}")
-                            if attempt == len(timeouts):
-                                return []
-                            continue
-                    else:
-                        print(f"   ⚠️  Sin JSON en intento {attempt}")
-                        if attempt == len(timeouts):
-                            return []
-                        continue
-                else:
-                    print(f"   ❌ Error HTTP {response.status_code} en intento {attempt}")
-                    if attempt == len(timeouts):
-                        return []
-                    continue
-            except requests.exceptions.Timeout:
-                print(f"   ⏰ Timeout en intento {attempt}")
-                if attempt == len(timeouts):
-                    return []
-                continue
-            except Exception as e:
-                print(f"   ❌ Error en intento {attempt}: {e}")
-                if attempt == len(timeouts):
-                    return []
-                continue
-        return []
+                    }
+                    processed_chunks.append(processed_chunk)
+                print(f"   ✅ LLM (HF) generó: {len(processed_chunks)} chunks")
+                return processed_chunks
+            else:
+                print("   ⚠️ No se encontró un JSON válido en la respuesta del modelo.")
+                return []
+        except Exception as e:
+            print(f"   ❌ Error generando respuesta con Hugging Face: {e}")
+            return []
 
     def _structural_chunking(self, program_text: str, program_name: str) -> List[Dict[str, Any]]:
         chunks = []
@@ -208,8 +134,8 @@ Crea chunks JSON:
         if fee_match:
             fee_amount_str = fee_match.group(1).replace(',', '').replace('.', '')
             fee_amount = int(fee_amount_str) if fee_amount_str.isdigit() else 0
-            fee_chunk = {
-                'content': f"{program_name}\n\nCosto: ${fee_match.group(1)} COP por semestre\n\nInformación de matrícula para {program_name}.",
+            chunks.append({
+                'content': f"{program_name}\n\nCosto: ${fee_match.group(1)} COP por semestre\n\nInformación de matrícula.",
                 'metadata': {
                     'type': 'fee',
                     'program_name': program_name,
@@ -217,26 +143,24 @@ Crea chunks JSON:
                     'chunk_strategy': 'structural_pattern',
                     'confidence': 0.95
                 }
-            }
-            chunks.append(fee_chunk)
+            })
 
         profile_match = re.search(self.structural_patterns['occupational_profile'], program_text, re.DOTALL)
         if profile_match:
-            profile_chunk = {
-                'content': f"{program_name} - Perfil Ocupacional\n\n{profile_match.group(1).strip()}\n\nCampo laboral y oportunidades profesionales.",
+            chunks.append({
+                'content': f"{program_name} - Perfil Ocupacional\n\n{profile_match.group(1).strip()}",
                 'metadata': {
                     'type': 'occupational_profile',
                     'program_name': program_name,
                     'chunk_strategy': 'structural_pattern',
                     'confidence': 0.9
                 }
-            }
-            chunks.append(profile_chunk)
+            })
 
         if '**Curriculo:**' in program_text:
             curriculum_start = program_text.find('**Curriculo:**')
             curriculum_content = program_text[curriculum_start:curriculum_start + 500]
-            curriculum_chunk = {
+            chunks.append({
                 'content': f"{program_name} - Plan de Estudios\n\n{curriculum_content}{'...' if len(program_text[curriculum_start:]) > 500 else ''}",
                 'metadata': {
                     'type': 'curriculum_summary',
@@ -244,21 +168,16 @@ Crea chunks JSON:
                     'chunk_strategy': 'structural_curriculum',
                     'confidence': 0.9
                 }
-            }
-            chunks.append(curriculum_chunk)
+            })
 
         semester_matches = re.findall(self.structural_patterns['semester'], program_text)
         for semester_num, semester_content in semester_matches:
             subjects = re.findall(self.structural_patterns['subject'], semester_content)
-
             if subjects:
                 total_credits = sum(int(credits) for _, credits in subjects)
-                semester_text = f"{program_name} - Semestre {semester_num}\n\n"
-                semester_text += f"Total materias: {len(subjects)}\n"
-                semester_text += f"Total créditos: {total_credits}\n\nMaterias:\n"
-                for subject_name, credits in subjects:
-                    semester_text += f"- {subject_name.strip()} ({credits} créditos)\n"
-                semester_chunk = {
+                semester_text = f"{program_name} - Semestre {semester_num}\n\nTotal materias: {len(subjects)}\nTotal créditos: {total_credits}\n\n"
+                semester_text += "\n".join([f"- {s} ({c} créditos)" for s, c in subjects])
+                chunks.append({
                     'content': semester_text,
                     'metadata': {
                         'type': 'curriculum_semester',
@@ -269,42 +188,22 @@ Crea chunks JSON:
                         'chunk_strategy': 'structural_pattern',
                         'confidence': 0.85
                     }
-                }
-                chunks.append(semester_chunk)
-            else:
-                semester_chunk = {
-                    'content': f"{program_name} - Semestre {semester_num}\n\n{semester_content.strip()}",
-                    'metadata': {
-                        'type': 'curriculum_semester',
-                        'program_name': program_name,
-                        'semester_number': semester_num,
-                        'chunk_strategy': 'structural_fallback',
-                        'confidence': 0.7
-                    }
-                }
-                chunks.append(semester_chunk)
+                })
 
         return chunks
 
     def _merge_chunks_intelligently(self, llm_chunks: List[Dict], structural_chunks: List[Dict]) -> List[Dict]:
-        merged = []
-        for llm_chunk in llm_chunks:
-            merged.append(llm_chunk)
-
+        merged = llm_chunks[:]
         for struct_chunk in structural_chunks:
             struct_type = struct_chunk['metadata']['type']
             struct_program = struct_chunk['metadata']['program_name']
-
             llm_covers = any(
-                c['metadata']['type'] == struct_type and
-                c['metadata']['program_name'] == struct_program
+                c['metadata']['type'] == struct_type and c['metadata']['program_name'] == struct_program
                 for c in llm_chunks
             )
-
             if not llm_covers:
                 struct_chunk['metadata']['source'] = 'structural_fallback'
                 merged.append(struct_chunk)
-
         return merged
 
     def process_full_curriculum_parallel(self, file_path: str) -> List[Dict[str, Any]]:
@@ -382,12 +281,9 @@ Crea chunks JSON:
                 break
 
         if tech_match:
-            progs_tech = self._extract_programs_from_section(tech_match)
-            programs.extend(progs_tech)
-
+            programs.extend(self._extract_programs_from_section(tech_match))
         if undergrad_match:
-            progs_undergrad = self._extract_programs_from_section(undergrad_match)
-            programs.extend(progs_undergrad)
+            programs.extend(self._extract_programs_from_section(undergrad_match))
 
         print(f"   Total programas extraídos: {len(programs)}")
         return programs
@@ -395,7 +291,6 @@ Crea chunks JSON:
     def _extract_programs_from_section(self, section_text: str) -> List[Tuple[str, str]]:
         programs = []
         program_headers = list(re.finditer(self.structural_patterns['program_header'], section_text))
-
         if not program_headers:
             print("⚠️ No se encontraron programas individuales en la sección.")
             return []

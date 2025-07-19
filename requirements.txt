@@ -12,6 +12,7 @@ faiss-cpu>=1.7.4
 # LLM Local
 ollama>=0.1.0
 transformers>=4.35.0
+torchserve>=0.2.0
 
 # Backend
 fastapi>=0.104.0
